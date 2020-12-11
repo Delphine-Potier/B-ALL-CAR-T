@@ -1,0 +1,26 @@
+FROM ubuntu:16.04
+
+# ##################################
+# Add required folder for binding
+# ##################################
+RUN mkdir /scratch
+
+# ##################################
+# Installing required packages
+# ##################################
+RUN  apt-get update \
+  && apt-get -y upgrade \
+  && apt-get install -y bzip2 \
+  && apt-get install -y wget
+
+# ##################################
+# Downloading Cell Ranger tarball
+# ##################################
+# Download Cell Ranger v3.0.1 tarball to the directory of you choice cellranger-3.0.1.tar
+
+RUN wget  /tmp/cellranger-3.0.1.tar
+RUN rm -rf /usr/local/share/cellranger
+RUN mkdir -p /usr/local/share/cellranger
+RUN mv /tmp/cellranger-3.0.1.tar /usr/local/share/cellranger
+RUN cd /usr/local/share/cellranger && tar xvf cellranger-3.0.1.tar
+RUN rm /usr/local/share/cellranger/cellranger-3.0.1.tar

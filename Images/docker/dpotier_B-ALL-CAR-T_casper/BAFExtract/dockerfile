@@ -1,0 +1,78 @@
+FROM ubuntu:16.04
+
+# ##################################
+# Installing required packages
+# ##################################
+RUN  apt-get update \
+  && apt-get -y upgrade \
+  && apt-get -y install apt-utils \
+  && apt-get install -y bzip2 \
+  && apt-get install -y wget \
+  && apt-get install -y git \
+  && apt-get -y install gcc \
+  && apt-get -y install build-essential \
+  && apt-get -y install make \
+  && apt-get -y install zlib1g-dev \
+  && apt-get -y install ncurses-dev
+
+
+# ##################################
+# Adding BAFExtract git            #
+# ##################################
+
+RUN git clone https://github.com/akdess/BAFExtract /opt/BAFExtract
+RUN make -C /opt/BAFExtract \
+   && ln -s /opt/BAFExtract /usr/local/bin
+
+
+# ##################################
+# Adding Samtools 1.2              #
+# ##################################
+RUN wget https://github.com/samtools/samtools/releases/download/1.2/samtools-1.2.tar.bz2;\
+    tar -xaf samtools-1.2.tar.bz2 && rm -rf samtools-1.2.tar.bz2 ;\
+    cd samtools-1.2;\
+    make && ln -f -s `pwd`/* /usr/local/bin/ && cd ../
+
+
+# ##################################
+# Adding subset-bam_linux          #
+# ##################################
+
+RUN wget https://github.com/10XGenomics/subset-bam/releases/download/v1.1.0/subset-bam_linux -P /opt
+RUN chmod 555 /opt/subset-bam_linux
+
+# ##################################
+# Adding bedtools-2.25.0           #
+# ##################################
+### Installing bedtools2
+
+RUN apt-get update \ 
+  && apt-get install -y  python3.5 python3-pip build-essential pkg-config libffi-dev libmagickwand-dev python-cffi python3-dev 
+
+RUN pip3 install --upgrade pip
+RUN apt-get install -y libpcap-dev libpq-dev
+RUN apt-get install -y python3-numpy
+RUN apt-get install -y python3-tk
+
+
+RUN wget https://github.com/arq5x/bedtools2/releases/download/v2.25.0/bedtools-2.25.0.tar.gz;\
+    tar -zxvf bedtools-2.25.0.tar.gz && rm -rf bedtools-2.25.0.tar.gz ;\
+    cd bedtools2;\
+    make && ln -f -s `pwd`/* /usr/local/bin/ && cd ../
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

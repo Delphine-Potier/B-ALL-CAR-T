@@ -1,0 +1,110 @@
+# Based on rocker - https://github.com/rocker-org/rocker-versioned
+FROM rocker/rstudio:3.6.3
+
+
+# ##############################
+# R packages system dependencies
+# ##############################
+
+RUN apt-get update && apt-get install -y optipng \
+                                         pandoc \
+                                         libpng-dev \
+                                         zlib1g-dev \
+                                         libssl-dev \
+                                         libcurl4-openssl-dev
+
+# ####################################
+# INSTALLING R PACKAGES FOR PROJECT
+# ####################################
+
+RUN apt-get update && apt-get install -y libxml2-dev libhdf5-serial-dev libudunits2-dev 
+RUN  apt-get update \ 
+  && export DEBIAN_FRONTEND=noninteractive \
+## && apt-get -y install xorg openbox
+  && apt-get -y install libx11-dev freeglut3 freeglut3-dev libpng-dev 
+
+
+
+RUN R -e 'install.packages( "knitr")'
+RUN R -e 'install.packages( "ade4")'
+RUN R -e 'install.packages( "ggplot2")'
+RUN R -e 'install.packages( "magrittr")'
+RUN R -e 'install.packages( "dplyr")'
+RUN R -e 'install.packages( "Rtsne")'
+RUN R -e 'install.packages( "ggrepel")'
+RUN R -e 'install.packages( "Rcpp")'
+
+
+RUN R -e 'install.packages( "rprojroot")'
+RUN R -e 'install.packages( "rmarkdown")'
+RUN R -e 'install.packages( "htmltools")'
+RUN R -e 'install.packages( "reshape")'
+RUN R -e 'install.packages( "gridExtra")'
+RUN R -e 'install.packages( "openxlsx")'
+RUN R -e 'install.packages( "corrplot")'
+RUN R -e 'install.packages( "reticulate")'
+RUN R -e 'install.packages( "feather")'
+RUN R -e 'install.packages( "devtools")'
+RUN R -e 'install.packages( "ggthemes")'
+
+RUN R -e 'install.packages( "sctransform")'
+RUN R -e 'install.packages( "BiocManager")'
+RUN R -e 'BiocManager::install()'
+RUN R -e 'library(BiocManager)'
+RUN R -e 'install.packages("BiocInstaller")'
+RUN R -e 'BiocManager::install("BiocInstaller")'
+RUN R -e 'library(devtools);devtools::install_version(package = "Seurat")'
+RUN R -e 'BiocManager::install("GOstats")'
+RUN R -e 'BiocManager::install("GO.db")'
+RUN R -e 'BiocManager::install("org.Mm.eg.db")'
+RUN R -e 'BiocManager::install("org.Hs.eg.db")'
+RUN R -e 'BiocManager::install("clusterProfiler")'
+
+#RUN R -e 'BiocManager::install("monocle", version = "3.8")'
+RUN R -e 'install.packages("DDRTree")'
+RUN R -e 'install.packages("pheatmap")'
+RUN R -e 'devtools::install_github("chris-mcginnis-ucsf/DoubletFinder")'
+RUN R -e 'library(devtools);devtools::install_github(c("hadley/ggplot2", "jrnold/ggthemes"))'
+RUN R -e 'install.packages("DT")'
+RUN R -e 'install.packages("funr")'
+RUN R -e 'BiocManager::install("limma")'
+RUN R -e 'install.packages("ggpubr")'
+
+
+## dependencies
+RUN apt-get update && apt-get install -y  apt-utils
+RUN apt-get update \ 
+  && apt-get install -y  python3.5 python3-pip build-essential pkg-config libffi-dev libmagickwand-dev python-cffi python3-dev 
+
+
+
+RUN pip3 install --upgrade pip
+RUN apt-get install -y libpcap-dev libpq-dev
+RUN apt-get install -y python3-numpy
+RUN apt-get install -y python3-tk
+RUN pip3 install pandas
+RUN pip3 install matplotlib
+RUN pip3 install feather-format
+RUN pip3 install nbconvert
+RUN pip3 install patsy 
+RUN pip3 install sklearn
+RUN pip3 install umap-learn
+
+RUN pip3 install git+https://github.com/Teichlab/NaiveDE.git
+RUN pip3 install scipy
+RUN pip3 install tqdm
+RUN rm -f /usr/bin/python 
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+RUN R -e 'BiocManager::install("ComplexHeatmap")'
+RUN R -e 'devtools::install_github("caleblareau/BuenColors")'
+RUN R -e 'BiocManager::install("GenomicRanges")'
+RUN R -e 'install.packages("dbplyr")'
+RUN R -e 'BiocManager::install("biomaRt")'
+RUN R -e 'library("IRanges");library("biomaRt");library("limma");library("GO.db");library("org.Hs.eg.db");library("GOstats");library("GenomicRanges");devtools::install_github("akdess/CaSpER")'
+#RUN R -e 'require("devtools")'
+#RUN R -e 'install_github("akdess/CaSpER")'
+
+RUN apt-get install -y vim
+
+CMD ["/init"]

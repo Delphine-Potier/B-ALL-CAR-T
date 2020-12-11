@@ -1,0 +1,1166 @@
+---
+title: "Single-cell profiling identifies pre-existing CD19-negative subclones in a B-ALL patient with CD19-negative relapse after CAR-T therapy"
+author: "Delphine Potier"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+always_allow_html: yes
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    code_folding: hide
+  pdf_document: 
+    toc: true
+    toc_depth: 3
+    highlight: zenburn
+editor_options: 
+  chunk_output_type: console
+---
+
+Authors : Tracy Rabilloud\*, Delphine Potier\*, Saran Pankew, Mathis Nozais, Marie Loosveld§, Dominique Payet-Bornet§
+
+\* Equal contribution
+
+§ Corresponding authors
+
+
+PMID: to come
+
+Raw data and intermediate data matrices are available in SRA/GEO (SRP269742 / GSE153697) 
+
+Docker images and intermediate seurat object are available in zenodo.
+Any questions on this analysis, please contact Delphine Potier
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r env_loading, include=FALSE}
+# Load packages, data and functions
+library(Seurat)
+library(DT)
+library(plotly)
+
+
+# Path to the folder containing scripts used in the analysis
+CWD <- "<WORKING_DIR>" 
+
+#  Path to the folder that will contain output objects
+OUTPUT_PATH <- "<WORKING_DIR>/1_Seurat_analysis/output"
+
+# Load the R scripts containing the functions used in the analysis
+source(paste(CWD, "scripts/Workflow_functions.R", sep="/"))
+
+# Set the random number seed
+set.seed(1234)
+
+# Resolution parameter for Seurat clustering
+RESOLUTION <- 0.1
+```
+
+
+```{r path_loading, include=FALSE}
+
+# Load path for files
+PATH_DATA <- "<WORKING_DIR>/1_Seurat_analysis/data/mRNA/"
+SAMPLE <- "BALL-CART"
+PROJECT_NAME <- paste("10X_", SAMPLE, sep = "")
+PATH_HTO_DATA <- "<WORKING_DIR>/1_Seurat_analysis/data/HTO"
+```
+
+```{r final_object_loading}
+#Directly load the final object
+#load(paste0(OUTPUT_PATH, "Seurat_final_", SAMPLE, ".Robj"))
+```
+
+# Data preprocessing
+
+```{r Sample_loading, include=FALSE}
+# Read 10X data
+bm_data <- Read10X(data.dir = PATH_DATA)
+
+# Create the Seurat object and applies filters 
+Not_processed_Seurat <- CreateSeuratObject(counts = bm_data, min.cells = 3, min.features = 200, project = "CART")
+```
+
+```{r HTO_loading, message=FALSE, include=FALSE}
+# Load in the UMI matrix
+umi_sparse <- GetAssayData(object = Not_processed_Seurat, slot = "counts")
+
+# Load in the HTO count matrix
+raw.hto <- Read10X(PATH_HTO_DATA, gene.column = 1)
+#remove the "unmapped column"
+hto <- raw.hto[c(1:4),]
+
+# Renames samples with shorter identifiers
+# Used HTO were the following
+# CTTTGTCTTTGTGAG, HTO-B (T1-CD19neg)
+# AAGTATCGTTTCGCA, HTO-A (T1-CD19pos)
+# AAAGCATTCTTCACG, HTO-D (T2-CD19neg)
+# CTTGCCGCATGTCAT, HTO-C (T2-CD19pos)
+
+rownames(hto) <- c("T1-CD19neg","T1-CD19pos","T2-CD19neg","T2-CD19pos")
+
+# Select cell barcodes detected by both RNA and HTO
+joint_bcs <- intersect(colnames(umi_sparse),colnames(hto))
+
+# Subset RNA and HTO counts by joint cell barcodes
+hto <- as.matrix(hto[,joint_bcs])
+```
+
+
+```{r mRNA_HTO_composite_object_creation, message=FALSE, include=FALSE}
+### Setup seurat object and add in the hto data
+# Setup Seurat object
+hashtag <- CreateSeuratObject(counts = umi_sparse[,joint_bcs], assay = "RNA", project = "CART")
+
+# Normalize RNA data with log normalization
+hashtag <- NormalizeData(hashtag, display.progress = FALSE)
+# Find and scale variable genes
+hashtag <- FindVariableFeatures(hashtag, do.plot = F, selection.method = "vst", nfeatures = 2000, display.progress = FALSE)
+hashtag <- ScaleData(hashtag,genes.use = hashtag1@var.features) 
+
+### Adding HTO data as an independent assay
+# Add HTO data as a new assay independent from RNA
+hashtag[["HTO"]] <- CreateAssayObject(counts = hto)
+hashtag <- SetAssayData(hashtag,assay = "HTO",slot = "counts",new.data = hto)
+# Normalize HTO data using centered log-ratio (CLR) transformation
+hashtag <- NormalizeData(hashtag, assay = "HTO",normalization.method = "CLR",display.progress = FALSE)
+```
+
+
+```{r HTO_demultiplexing, message=FALSE, include=FALSE}
+#Demultiplex cells based on HTO enrichment, we used the Seurat function HTODemux() to assign single cells back to their sample origins.
+hashtag <- HTODemux(hashtag, assay = "HTO", positive.quantile = 0.99, verbose = FALSE)
+hashtag <- MULTIseqDemux(hashtag, assay = "HTO",autoThresh = TRUE, maxiter = 10,qrange = seq(from = 0.1, to = 0.9, by = 0.05), verbose = TRUE) # was just to test, we finally used HTODemux
+```
+
+##Demultiplexing results {.tabset}
+###Cells classification
+
+Demultiplexing of cells based on HTO enrichment using **HTOdemux()**
+
+Cells classification as singlets, doublets and negative/ambiguous cells
+
+```{r print_cells_classification, message=FALSE}
+# Global classification results
+datatable(as.matrix(table(hashtag@meta.data$HTO_classification.global)), colnames = "Number of cells")
+```
+
+Detailed classification
+
+```{r }
+# Detailed classification results
+datatable(as.matrix(table(hashtag@meta.data$HTO_classification)), colnames = "Number of cells", options = list(pageLength = 11))
+```
+
+
+## Cells filtering {.tabset}
+
+During the sample loading, we filter cells that do not pass the following filters : 
+
+**I) Filter out low quality cells.**
+
+Parameters used in the Seurat *CreateSeuratObject* function:
+
+* min.genes: Include cells where at least **200** genes are detected
+
+* min.cells: Include genes with detected expression in at least **3** cells 
+
+After those filters, the remaining cell number is **`r length(colnames(hashtag@assays$RNA@data))`**.
+
+```{r cell_selection, results='asis'}
+# Get cell identities for each sample
+HTO_T1neg <- row.names(subset(hashtag@meta.data, hash.ID == "T1-CD19neg" ))
+HTO_T1pos <- row.names(subset(hashtag@meta.data, hash.ID == "T1-CD19pos" ))
+HTO_T2neg <- row.names(subset(hashtag@meta.data, hash.ID == "T2-CD19neg" ))
+HTO_T2pos <- row.names(subset(hashtag@meta.data, hash.ID == "T2-CD19pos" ))
+
+# Get the list of cell by time point
+HTO_T0 = c(HTO_T1neg,HTO_T1pos)
+HTO_T1 = c(HTO_T2neg,HTO_T2pos)
+
+# Get the list of cells to keep
+HTO_identified = c(HTO_T0, HTO_T1)
+
+# Create a "clean" Seurat object without doublet and unassigned cells
+clean.subset <- subset(x = hashtag, cells = HTO_identified)
+```
+
+
+**II) Filter out doublet and negative cells after HTOdemux sample demultiplexing.**
+
+After selecting identified unique cells, **`r length(colnames(clean.subset@assays$RNA@data))`** cells remain.
+
+```{r Significant_PC_1, include=FALSE}
+# Data preprocessing
+if(!file.exists(paste0(OUTPUT_PATH, "Seurat_clean-subset_", SAMPLE, ".Robj"))){
+  #1- Mitochondrial QC
+  Seurat <- QC_function_mito_threshold(Seurat = clean.subset, mito_threshold = 0.1, do_plot = FALSE)#QC_function_mito_threshold function is in Workflow_functions.R 
+  
+  #2- Find variable genes
+  Seurat <- FindVariableFeatures(object = Seurat, 
+                            assay = "RNA", selection.method = "vst", nfeatures = 2000,
+                            verbose = FALSE, do.plot=TRUE)
+  
+  #3- Scale data  
+  Seurat <- ScaleData(Seurat, 
+                      assay="RNA",
+                      verbose = FALSE, 
+                      do.center = TRUE)#,features = rownames(Seurat)) to get all genes scaled
+  
+  #4- Compute PCA
+  Seurat <- RunPCA(object = Seurat,
+                   assay = "RNA",
+                   verbose = FALSE, 
+                   features =  VariableFeatures(object = Seurat), 
+                   seed.use = 1234,
+                   npcs = 50)
+
+  #5- Elbowplot of principle components ranked based on the percentage of variance explained by each one.
+  ElbowPlot(Seurat, ndims = 50, reduction = "pca")
+  # We  observe an ‘elbow’ around PC20, suggesting that the majority of true signal is captured in the first 20 PCs
+  
+  #6- Print genes that are strongly correlated with the first PCs
+  Seurat <- ProjectDim(object = Seurat,
+                  nfeatures.print = 20,
+                  dims.print = 1:10)
+  
+  #7- Define clusters
+  Seurat <- FindNeighbors(object = Seurat, 
+                  dims = 1:20 , 
+                  verbose = FALSE, 
+                  force.recalc = TRUE, 
+                  reduction = "pca")
+  
+  # Fine clustering
+  Seurat <- FindClusters(object = Seurat, 
+                  resolution = RESOLUTION,
+                  verbose = FALSE,
+                  random.seed = 1234)
+  
+  # Coarse grained clustering
+  Seurat <- FindClusters(object = Seurat, 
+                  resolution = 0.1,
+                  verbose = FALSE,
+                  random.seed = 1234)
+
+  
+  #8- Calulate UMAP coordinates based on the 20 first PCs
+  Seurat <- RunUMAP(object = Seurat, reduction = "pca", seed.use = 1234, dims = 1:20)
+  
+  save(Seurat, file = paste0(OUTPUT_PATH, "Seurat_clean-subset_", SAMPLE, ".Robj"))
+}else{
+  load(paste0(OUTPUT_PATH, "Seurat_clean-subset_", SAMPLE, ".Robj"))
+}
+```
+
+
+**III)  Filter out cells having more than 10% mitochondrial associated genes expressed.**
+
+Only the **`r length(colnames(Seurat@assays$RNA@data))`** cells below the red line are kept (mitochondrial percentage < 0.1).
+
+### Mitochondrial percentage versus nFeatures
+
+```{r mito_vs_nfeatures}
+# Plot percentage of reads mapping to the mitochondrial genome in function of RNA features number
+df<-data.frame(hash.id=Seurat@misc$old_meta_data$hash.ID,percent.mito=Seurat@misc$old_meta_data$percent.mito,nFeature_RNA=Seurat@misc$old_meta_data$nFeature_RNA)
+ggplotly(ggplot(df,aes(x=nFeature_RNA,y=percent.mito,color=hash.id))+geom_point()+geom_hline(aes(yintercept=0.1, colour = "max %mito")))
+```
+
+
+```{r save_exp_mat_for_selected cells}
+# save mRNA raw expression matrix for the cells/genes passing QCs; this expression matrix will be used to run pySCENIC
+clean.raw.exp.mat <- as.matrix(Seurat@assays$RNA@counts)
+write.table(data.frame("ID" = rownames(clean.raw.exp.mat),clean.raw.exp.mat), file = paste0(OUTPUT_PATH,"GSE153697_filtered_raw_expression_matrix.tsv"), quote = FALSE, sep = "\t", row.names = FALSE)
+
+# save mRNA normalized expression matrix for the cells/genes passing QCs
+clean.data.exp.mat <- as.matrix(Seurat@assays$RNA@data)
+write.table(data.frame("ID" = rownames(clean.data.exp.mat),clean.data.exp.mat), file = paste0(OUTPUT_PATH,"GSE153697_filtered_normalized_expression_matrix.tsv"), quote = FALSE, sep = "\t", row.names = FALSE)
+
+# save metadata informations (sample of origin + cluster)
+metadata <- as.matrix(Seurat@meta.data)[,c(11,17)]
+write.table(data.frame("ID" = rownames(metadata),metadata), file = paste0(OUTPUT_PATH,"GSE153697_filtered_metadata_matrix.tsv"), quote = FALSE, sep = "\t", row.names = FALSE)
+```
+
+
+
+### Number of features and counts by sample (violin plot)
+
+```{r}
+VlnPlot(Seurat,features = c("nFeature_RNA", "nCount_RNA"),pt.size = 0.1, log = TRUE,  group.by = "hash.ID")
+```
+
+As expected, samples containing mostly tumoral cells (T1-CD19pos and T2-CD19neg) show a higher number of expressed genes.
+
+
+## UMAP colored by samples {.tabset}
+
+###Samples UMAP
+
+Figure 1D : UMAP visualization of the 4 demultiplexed samples  : T1-CD19neg, T1-CD19pos, T2-CD19neg & T2-CD19pos
+
+```{r sampleUMAP, fig.width = 6, fig.height = 7, message=FALSE}
+DimPlot(Seurat, reduction = "umap", group.by = "hash.ID", do.label = TRUE, pt.size = 1, cols = c("#00BA38","#B79F00","#00BFC4","red"), order = c("T1-CD19n","T1-CD19p","T2-CD19n","T2-CD19p") )#+NoLegend()
+```
+
+
+
+#Data analysis
+## Coarse-grained clustering {.tabset}
+
+Clusters resolution 0.1
+
+###Clusters UMAP 
+
+Figure 1C : UMAP visualization of the 6 main clusters
+
+```{r clusterUMAP, fig.width = 5, fig.height = 7, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+DimPlot(Seurat, reduction = "umap", group.by = "RNA_snn_res.0.1", do.label = TRUE, pt.size = 1, cols = c("#00BFC4","#B79F00","#619CFF","#00BA38","orange","#7c0073"))#,"#F564E3","red","blue"))#+NoLegend()
+```
+
+###Known markers expression
+
+Figure 1B : Dotplot showing the expression level of marker genes in each clusters 
+
+```{r markersDotplot, fig.width = 7, fig.height = 4, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+Seurat@active.ident <- factor(Seurat@active.ident,levels=c("5","2","4","3","1","0"))
+dp <- DotPlot(Seurat, features = c("CD34","RPS14","CD79A","CD79B","CD19","MME","NKG7","GNLY","KLRD1","GZMB","KLRC1","LYZ","CD68","LGALS3","CD14","CD33"), cols = c("blue","red") ) + RotatedAxis()
+dp + labs(title = "Expression of marker genes by clusters")
+```
+
+* B-ALL markers:
+CD34+; RPS14low 
+
+* B-cell markers:
+CD19+; CD79A+; CD79B+
+
+* Hematogones maturation markers
+Immature : CD10 (MME) up 
+Mature   : CD20 (MS4A1) up
+
+* NK-cell markers: 
+NKG7; GNLY; KLRD1; GZMB; KLRC1
+
+* Myeloid cells markers 
+LYZ; CD68; LGALS3; CD14; CD33
+
+
+
+*N.B. some of those markers are only for monocytes/macrophages, therefore the upper part of cluster 2 mostly composed of myeloid progenitors (CMP / MEP / GMP / pro-myelocytes) does not show high expression levels*
+
+
+UMAP visualization of markers expression
+
+```{r umapMarkers1, fig.width = 7.6, fig.height = 10, message=FALSE}
+FeaturePlot(object = Seurat, features = c("CD33","CD68","LGALS3","CD14"),reduction = "umap",  cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"), order = TRUE, pt.size = 0.2 , ncol = 2)
+```
+
+
+```{r umapMarkers2, fig.width = 7.6, fig.height = 10, message=FALSE}
+FeaturePlot(object = Seurat, features = c("LYZ","KLRC1","GZMB","KLRD1"),reduction = "umap",  cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"), order = TRUE, pt.size = 0.2 , ncol = 2)
+```
+
+
+```{r umapMarkers3, fig.width = 7.6, fig.height = 10, message=FALSE}
+FeaturePlot(object = Seurat, features = c("GNLY","NKG7","MME","CD19"),reduction = "umap",  cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"), order = TRUE, pt.size = 0.2 , ncol = 2)
+```
+
+
+```{r umapMarkers4, fig.width = 7.6, fig.height = 10, message=FALSE}
+FeaturePlot(object = Seurat, features = c("CD79A","CD79B","RPS14","CD34"),reduction = "umap",  cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"), order = TRUE, pt.size = 0.2 , ncol = 2)
+```
+
+###Interactive umap : clusters vs samples
+
+```{r , fig.width = 6, fig.height = 7, tSNE_clu_seurat_1}
+ggplotly(DimPlot(Seurat, reduction = "umap", group.by = "hash.ID", shape.by = "RNA_snn_res.0.1", do.label = TRUE, pt.size = 1, cols = c("#00BA38","#B79F00","#00BFC4","red"), order = c("T1-CD19n","T1-CD19p","T2-CD19n","T2-CD19p") ))
+```
+
+###DEGs analysis 
+
+Differential gene expression analysis:
+
+We search for markers specific to each clusters
+
+- Table
+
+```{r, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+if(! file.exists(paste0(OUTPUT_PATH, "FindAllMarkers_clusters_res0.1_results_", SAMPLE,".Robj"))){
+  Seurat_coarse_clusters_markers <- FindAllMarkers(object = Seurat, only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+  save(Seurat_coarse_clusters_markers, file = paste0(OUTPUT_PATH, "FindAllMarkers_clusters_res0.1_results_", SAMPLE,".Robj"))
+}else{
+  load(paste0(OUTPUT_PATH, "FindAllMarkers_clusters_res0.1_results_",SAMPLE,".Robj"))
+}
+
+datatable(Seurat_coarse_clusters_markers, options = list(pageLength = 15)) %>% formatRound(2, 1) %>% formatSignif(c(1,5))
+write.table(Seurat_coarse_clusters_markers, file = paste0(OUTPUT_PATH, "FindAllMarkers_clusters_clean-subset_results_", SAMPLE,".csv"), sep = ",")
+
+```
+
+- UMAPs
+
+The following plots show the expression of each cluster's top marker based on avg_logFC.
+
+```{r umapClusterMarkers, fig.width = 5, fig.height = 7}
+top_genes <- Seurat_coarse_clusters_markers %>% group_by(cluster) %>% top_n(10, avg_logFC) %>% top_n(20, p_val)
+
+top_genes_feature_plot <- Seurat_coarse_clusters_markers %>% group_by(cluster) %>% top_n(2, avg_logFC)
+
+print("PMAIP1 Promotes activation of caspases and apoptosis. Promotes mitochondrial membrane changes and efflux of apoptogenic proteins from the mitochondria. Contributes to p53/TP53-dependent apoptosis after radiation exposure.")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[1], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("AC245014.3 is a lincRNA, MUC20 overlapping transcript")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[2], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("PRDX1 : This gene encodes a member of the peroxiredoxin family of antioxidant enzymes, which reduce hydrogen peroxide and alkyl hydroperoxides. The encoded protein may play an antioxidant protective role in cells, and may contribute to the antiviral activity of CD8(+) T-cells. This protein may have a proliferative effect and play a role in cancer development or progression.")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[3], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("STMN1 : part of the cell cycle gene list;  
+This gene belongs to the stathmin family of genes. It encodes a ubiquitous cytosolic phosphoprotein proposed to function as an intracellular relay integrating regulatory signals of the cellular environment. The encoded protein is involved in the regulation of the microtubule filament system by destabilizing microtubules. It prevents assembly and promotes disassembly of microtubules.")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[4], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("S100A8 : Monocytes marker")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[5], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("S100A9 : Monocytes marker")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[6], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("VPREB1 : this gene belongs to the immunoglobulin superfamily and is expressed selectively at the early stages of B cell development, namely, in proB and early preB cells. This gene encodes the iota polypeptide chain that is associated with the Ig-mu chain to form a molecular complex which is expressed on the surface of pre-B cells. The complex is thought to regulate Ig gene rearrangements in the early steps of B-cell differentiation. Alternative splicing results in multiple transcript variants.")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[7], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("DNTT : This gene is a member of the DNA polymerase type-X family and encodes a template-independent DNA polymerase that catalyzes the addition of deoxynucleotides to the 3'-hydroxyl terminus of oligonucleotide primers. In vivo, the encoded protein is expressed in a restricted population of normal and malignant pre-B and pre-T lymphocytes during early differentiation, where it generates antigen receptor diversity by synthesizing non-germ line elements (N-regions) at the junctions of rearranged Ig heavy chain and T cell receptor gene segments.")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[8], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("IGKC")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[9], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("IGLL5 :  This gene encodes one of the immunoglobulin lambda-like polypeptides. It is located within the immunoglobulin lambda locus but it does not require somatic rearrangement for expression. The first exon of this gene is unrelated to immunoglobulin variable genes; the second and third exons are the immunoglobulin lambda joining 1 and the immunoglobulin lambda constant 1 gene segments.")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[10], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("GNLY :  The product of this gene is a member of the saposin-like protein (SAPLIP) family and is located in the cytotoxic granules of T cells, which are released upon antigen stimulation. This protein is present in cytotoxic granules of cytotoxic T lymphocytes and natural killer cells, and it has antimicrobial activity against M. tuberculosis and other organisms.")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[11], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+print("NKG7 : natural killer cell group 7 sequence")
+FeaturePlot(object = Seurat, features = top_genes_feature_plot$gene[12], cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"))
+```
+
+
+## Cell cycle {.tabset}
+### S score
+
+```{r  Sscore, fig.width = 5, fig.height = 7}
+#Check cell cycle
+################################################""""
+
+# Assign Cell-Cycle Scores
+Seurat <- CellCycleScoring(object = Seurat, s.features = cc.genes$s.genes, g2m.features = cc.genes$g2m.genes, set.ident = TRUE)
+
+# view cell cycle scores and phase assignments
+
+# Plot S score
+  Tsne<-data.frame(
+    UMAP_1 = Seurat@reductions$umap@cell.embeddings[,1],
+    UMAP_2= Seurat@reductions$umap@cell.embeddings[,2],
+    gene= Seurat@meta.data$S.Score
+  )
+  HTO= Seurat@meta.data$hash.ID
+  Max=max(Seurat@meta.data$S.Score)
+  Min=min(Seurat@meta.data$S.Score)
+
+  ggplotly(ggplot(Tsne,aes(x=UMAP_1,y=UMAP_2))+geom_point(aes(color=gene,shape=HTO))+
+    scale_colour_gradient2(low = "blue",mid="orange",high="red",name="S score",midpoint=(Max+Min)/2))
+
+```
+
+### G2M score
+
+```{r G2Mscore,  fig.width = 5, fig.height = 7}
+# Plot G2M scores
+  Tsne<-data.frame(
+    UMAP_1 = Seurat@reductions$umap@cell.embeddings[,1],
+    UMAP_2= Seurat@reductions$umap@cell.embeddings[,2],
+    gene= Seurat@meta.data$G2M.Score
+  )
+  HTO= Seurat@meta.data$hash.ID
+  Max=max(Seurat@meta.data$G2M.Score)
+  Min=min(Seurat@meta.data$G2M.Score)
+
+  ggplotly(ggplot(Tsne,aes(x=UMAP_1,y=UMAP_2))+geom_point(aes(color=gene,shape=HTO))+
+    scale_colour_gradient2(low = "blue",mid="orange",high="red",name="G2M score",midpoint=(Max+Min)/2))
+```
+
+### Phases
+
+```{r phases,  fig.width = 5, fig.height = 7}
+# Plot phases
+DimPlot(Seurat, reduction = "umap", group.by = "Phase",do.label = TRUE, pt.size = 1)
+```
+
+## Clustering vs Sample ID {.tabset}
+
+Cross-tabulated table :
+
+###Number of cells by samples in each cluster
+
+```{r, message=FALSE}
+datatable(t(as.data.frame.matrix(addmargins(table(Seurat@meta.data$hash.ID,Seurat@meta.data$RNA_snn_res.0.1)))[c(3:7),]),options = list(pageLength = 15)) 
+```
+
+###% of cells by samples in each cluster
+
+```{r, message=FALSE}
+datatable(t(as.data.frame.matrix(prop.table(table(Seurat@meta.data$hash.ID,Seurat@meta.data$RNA_snn_res.0.1),1))[c(3:6),]),options = list(pageLength = 15)) %>% formatRound(1:10, 1) %>% formatPercentage(1:10, 1)
+```
+
+##Clones backtracking {.tabset}
+
+Figure 2 related
+
+```{r, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+
+# Clones of interest : Get barcodes for T1-CD19neg clones located in the T1 tumoral area (Cluster 0)
+HTO_T1CD19n_in_T1CD19p <- intersect(row.names(subset(Seurat@meta.data, hash.ID == "T1-CD19neg")), WhichCells(Seurat, slot = "RNA_snn_res.0.1", idents = "0"))
+# Get barcodes for T1-CD19neg clones located in the T2 tumoral area (Cluster 1)
+HTO_T1CD19n_in_T2CD19n <- intersect(row.names(subset(Seurat@meta.data, hash.ID == "T1-CD19neg")), WhichCells(Seurat, slot = "RNA_snn_res.0.1", idents = "1"))
+# For a positive controle : Get barcodes for T1-CD19pos clones located in the T1 tumoral area (Cluster 0)
+HTO_T1CD19p_in_T1CD19p <- intersect(row.names(subset(Seurat@meta.data, hash.ID == "T1-CD19pos")), WhichCells(Seurat, slot = "RNA_snn_res.0.1", idents = "0"))
+##ctrlpos <- sample(WhichCells(subset(Seurat, cells = HTO_T1CD19p_in_T1CD19p), expression = CD19 > 1), 5) ## Randomly select clones for the positive control
+ctrlpos <- c("CACCACTTCCTTGACC","GTGCGGTTCGAGGTAG","CTAGTGACAATGGTCT")#,"CGTGTCTTCGGATGGA","GGTGCGTAGACACTAA") ## To keep the backtracked clones
+
+
+# For a negative controle : Get barcodes for T2-CD19neg clones located in the T2 tumoral area (Cluster 1)
+HTO_T2CD19n_in_T2CD19n <- intersect(row.names(subset(Seurat@meta.data, hash.ID == "T2-CD19neg")), WhichCells(Seurat, slot = "RNA_snn_res.0.1", idents = "1"))
+#ctrlneg <- sample(WhichCells(subset(Seurat, cells = HTO_T2CD19n_in_T2CD19n), expression = CD19 < 1), 5) ## Randomly select clones for the positive control
+ctrlneg <- c("GTTACAGGTTACAGAA","CCTCAGTGTGATGATA","GACACGCAGTCCGGTC")#,"CAAGTTGGTGCCTGCA","AAGGCAGAGGGCTTCC")## To keep the backtracked clones
+
+  
+HTO_T2CD19n_in_T1CD19p <- c("CACACCTGTCGAACAG","GACGTGCTCGGAAATA","GCTTGAACAATGGACG","GAACATCAGTGCCAGA")
+
+#Create a new metadata field (PCRCells)
+Seurat@meta.data$PCRCells <- "- Not tested -"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, hash.ID == "T1-CD19neg")),]$PCRCells = "- Not tested : T1-CD19neg -"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, hash.ID == "T1-CD19pos")),]$PCRCells = "- Not tested : T1-CD19pos -"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, hash.ID == "T2-CD19neg")),]$PCRCells = "- Not tested : T2-CD19neg -"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, hash.ID == "T2-CD19pos")),]$PCRCells = "- Not tested : T2-CD19pos -"
+Seurat@meta.data[ctrlpos,]$PCRCells = "Positive control : T1CD19pos in T1CD19pos"
+Seurat@meta.data[ctrlneg,]$PCRCells = "Negative control : T2CD19neg in T2CD19neg"
+Seurat@meta.data[HTO_T1CD19n_in_T2CD19n,]$PCRCells = "T1 CD19neg in T2 CD19neg"
+Seurat@meta.data[HTO_T1CD19n_in_T1CD19p,]$PCRCells = "T1 CD19neg in T1 CD19pos"
+Seurat@meta.data[HTO_T2CD19n_in_T1CD19p,]$PCRCells = "T2 CD19neg in T1 CD19pos"
+
+#interestingCells <- c(ctrlpos,ctrlneg,HTO_T1CD19n_in_T2CD19n,HTO_T1CD19n_in_T1CD19p,HTO_T2CD19n_in_T1CD19p,HTO_T1CD19p_in_T2CD19n)
+selected_cell_PCR <- c(ctrlpos,ctrlneg,HTO_T1CD19n_in_T2CD19n,HTO_T1CD19n_in_T1CD19p,HTO_T2CD19n_in_T1CD19p)
+```
+
+
+###All clones 
+
+Clones selected for backtracking
+
+```{r,fig.width = 10, fig.height = 8, message=FALSE}
+Idents(Seurat) <- "PCRCells"
+ggplotly(DimPlot(Seurat, reduction = "umap", group.by = "PCRCells", do.label = TRUE, pt.size = 1, cols = 
+c("#fdd1ce","#93d9db","#dbd193","#cae880","#B79F00","#00BFC4","red","#DC143C","brown")))
+#c("#fdd1ce","#cae880","#93d9db","#e1c0fa","#00BFC4","#7CAE00","#7c0073","red","blue")))
+```
+
+###T1 CD19neg clones in T1 tumoral area
+
+```{r,fig.width = 6, fig.height = 8, message=FALSE}
+a <- DimPlot(Seurat, reduction = "umap", group.by = "PCRCells", cols = c("#fdd1ce","#93d9db","#dbd193","#cae880","#B79F00","#00BFC4","red","#DC143C","brown"))+NoLegend()
+
+LabelPoints(plot = a, points = HTO_T1CD19n_in_T1CD19p, repel = TRUE, xnudge = -8, ynudge = -7)+ggtitle("T1-CD19neg in T1  tumoral area")
+```
+
+###T1 CD19neg clones in T2 tumoral area
+
+```{r,fig.width = 6, fig.height = 8, message=FALSE}
+LabelPoints(plot = a, points = HTO_T1CD19n_in_T2CD19n, repel = TRUE, xnudge = -5, ynudge = -5)+ggtitle("T1-CD19neg in T2 tumoral area")
+```
+
+###T2 CD19neg clones in T1 tumoral area
+
+```{r,fig.width = 6, fig.height = 8, message=FALSE}
+LabelPoints(plot = a, points = HTO_T2CD19n_in_T1CD19p, repel = TRUE, xnudge = -5, ynudge = -5)+ggtitle("T1-CD19neg in T2 tumoral area")
+```
+
+###Positive control
+
+```{r,fig.width = 6, fig.height = 8, message=FALSE}
+a <- DimPlot(Seurat, reduction = "umap", group.by = "PCRCells", cols = c("#fdd1ce","#93d9db","#dbd193","#cae880","#B79F00","#00BFC4","red","#DC143C","brown"))+NoLegend()
+LabelPoints(plot = a, points = ctrlpos, repel = TRUE, xnudge = -8, ynudge = -7)+ggtitle("Positive control")
+```
+
+###Negative control
+
+```{r,fig.width = 6, fig.height = 8, message=FALSE}
+LabelPoints(plot = a, points = ctrlneg, repel = TRUE, xnudge = -8, ynudge = -7)+ggtitle("Negative control")
+```
+
+
+
+
+###Summary table
+
+Table summarizing infos for interesting cells 
+
+```{r , fig.width = 12}
+options(max.print = 5000)
+# datatable(cbind(t(Seurat@assays$HTO@counts[,selected_cell_PCR]),Seurat@meta.data[selected_cell_PCR,c("PCRCells","RNA_snn_res.0.1","percent.mito","hash.ID","nFeature_RNA")]), options = list(pageLength = 100)) %>% formatRound(7,2)
+datatable(Seurat@meta.data[selected_cell_PCR,c("PCRCells","RNA_snn_res.0.1","percent.mito","hash.ID","nFeature_RNA")], options = list(pageLength = 100)) %>% formatRound(3,2)
+```
+
+
+
+
+## Extra DEG analysis {.tabset}
+
+### B-ALL cells (Cluster 0 & 1) : T1 CD19neg cells versus T1 CD19pos cells
+
+We selected B-ALL cells (cluster 0 & 1) to compare transcriptome from T1 CD19 negative and CD19 positive cells :
+
+We did not dectect "significant" differences between cluster 0 T1 CD19 negative and CD19 positive cells except for SPAST (this analysis is to take with caution, indeed there are only 20 T1 CD19 negative cells)
+
+```{r, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+subset.c0c1 <- subset(x = Seurat, idents = c("0","1"))
+
+Idents(subset.c0c1) <- "hash.ID"
+
+if(! file.exists(paste0(OUTPUT_PATH, "FindMarkers_cluster0and1_T1-CD19n_vs_T1-CD19p_", SAMPLE,".Robj"))){
+  Seurat_object_markers_T1CD19neg_vs_T1CD19pos <- FindMarkers(object = subset.c0c1, ident.1 = "T1-CD19neg", ident.2 = "T1-CD19pos", only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+  save(Seurat_object_markers_T1CD19neg_vs_T1CD19pos, file = paste0(OUTPUT_PATH, "FindMarkers_cluster0and1_T1-CD19n_vs_T1-CD19p_",SAMPLE,".Robj"))
+}else{
+  load(paste0(OUTPUT_PATH, "FindMarkers_cluster0and1_T1-CD19n_vs_T1-CD19p_",SAMPLE,".Robj"))
+}
+datatable(Seurat_object_markers_T1CD19neg_vs_T1CD19pos, options = list(pageLength = 5)) %>% formatRound(2:4, 2) %>% formatSignif(c(1,5), digits = 2)
+write.table(Seurat_object_markers_T1CD19neg_vs_T1CD19pos, file = paste0(OUTPUT_PATH, "FindMarkers_cluster0and1_T1-CD19n_vs_T1-CD19p_",SAMPLE,".csv"), sep = ",")
+```
+
+For comparison, we did an additionnal differential expression analysis.
+
+1 - Cluster 0 T1 CD19 negative cells to Cluster 1 T2 CD19 negative cells : 
+
+We found more differences than in the previous comparison (cluster 0 : T1 CD19 negative versus CD19 positive cells) similar to the differences found when comparing T1 CD19pos and T2 CD19neg from cluster 0 and 1 (see below, e.g. TSC22D3, KLF6, PMAIP1...)
+
+```{r, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+subset.c0 <- subset(x = Seurat, idents = "0")
+subset.c1 <- subset(x = Seurat, idents = "1")
+
+c1.T2CD19neg = row.names(subset(subset.c1@meta.data, hash.ID == "T2-CD19neg"))
+c0.T1CD19neg = row.names(subset(subset.c0@meta.data, hash.ID == "T1-CD19neg"))
+
+if(! file.exists(paste0(OUTPUT_PATH, "FindMarkers_cluster0_T1-CD19n_vs_cluster1_T2-CD19n_",SAMPLE,".Robj"))){
+  Seurat_object_markers_T1CD19neg_vs_T2CD19neg <- FindMarkers(object = Seurat, ident.1 = c0.T1CD19neg, ident.2 = c1.T2CD19neg, only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+  save(Seurat_object_markers_T1CD19neg_vs_T2CD19neg, file = paste0(OUTPUT_PATH, "FindMarkers_cluster0_T1-CD19n_vs_cluster1_T2-CD19n_",SAMPLE,".Robj"))
+}else{
+  load(paste0(OUTPUT_PATH,"FindMarkers_cluster0_T1-CD19n_vs_cluster1_T2-CD19n_",SAMPLE,".Robj"))
+}
+datatable(Seurat_object_markers_T1CD19neg_vs_T2CD19neg, options = list(pageLength = 10)) %>% formatRound(2:4, 2) %>% formatSignif(c(1,5), digits = 2)
+write.table(Seurat_object_markers_T1CD19neg_vs_T2CD19neg, file = paste0(OUTPUT_PATH,"FindMarkers_cluster0_T1-CD19n_vs_cluster1_T2-CD19n_",SAMPLE,".csv"), sep = ",")
+```
+
+### B-ALL cells (Cluster 0 & 1) versus other cell types
+
+Related to Figure 2B and Supplementary Figure 5
+
+1 - Comparison of B-ALL cells (excluding the 20 B-ALL T1 CD19neg cells) to other cell types 
+
+2 - Visualization of the expression profile of differentially expressed genes across clusters of interest (higlighting the 20 B-ALL T1 CD19neg)
+
+
+
+**B-ALL versus Physiological B-cells**
+
+```{r, message=FALSE}
+Seurat@meta.data$clusterSubset <- "Nothing"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, RNA_snn_res.0.1 == "0")),]$clusterSubset = "(0) B-ALL"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, RNA_snn_res.0.1 == "1")),]$clusterSubset = "(1) B-ALL"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, RNA_snn_res.0.1 == "2")),]$clusterSubset = "(2) Myeloid"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, RNA_snn_res.0.1 == "3")),]$clusterSubset = "(3) Physiological B-cells"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, RNA_snn_res.0.1 == "4")),]$clusterSubset = "(4) Physiological B-cells"
+Seurat@meta.data[row.names(subset(Seurat@meta.data, RNA_snn_res.0.1 == "5")),]$clusterSubset = "(5) NK cells"
+Seurat@meta.data[c(HTO_T1CD19n_in_T2CD19n),]$clusterSubset = "(0 & 1) T1 CD19neg in B-ALL"
+Seurat@meta.data[c(HTO_T1CD19n_in_T1CD19p),]$clusterSubset = "(0 & 1) T1 CD19neg in B-ALL"
+
+Idents(Seurat) <- "clusterSubset"
+```
+
+* B-ALL (clusters 0 & 1) versus Physiological immature B-cells (hematogones, cluster3)
+```{r, message=FALSE}
+#1- compare B-ALL to hematogones
+##Do the comparison
+BALL_vs_HEMATOG_markers <- FindMarkers(object = Seurat, ident.1 = c("(0) B-ALL","(1) B-ALL"), ident.2 = "(3) Physiological B-cells" ,only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+##Table of differentially expressed genes
+datatable(BALL_vs_HEMATOG_markers, options = list(pageLength = 10)) %>% formatRound(2:4, 2) %>% formatSignif(c(1,5), digits = 2)
+#keep only genes in scale.data
+BALL_vs_HEMATOG_markers <- BALL_vs_HEMATOG_markers[intersect(rownames(Seurat@assays$RNA@scale.data),rownames(BALL_vs_HEMATOG_markers)),]
+BALL_vs_HEMATOG_markers <- BALL_vs_HEMATOG_markers[order(BALL_vs_HEMATOG_markers$p_val_adj,decreasing = F),]
+##Print a heatmap with B-ALL cells + 20 cells + Hematogones  
+ball0 <- sample(colnames(subset(Seurat, idents = "(0) B-ALL")), 100) ## Randomly select clones for the heatmap
+ball1 <- sample(colnames(subset(Seurat, idents = "(1) B-ALL")), 100) ## Randomly select clones for the heatmap
+ballt1neg <- colnames(subset(Seurat, idents = "(0 & 1) T1 CD19neg in B-ALL" ))
+bcell3 <- sample(colnames(subset(Seurat, idents = "(3) Physiological B-cells" )), 100) ## Randomly select clones for the heatmap
+top_genes_b3 <- rownames(head(BALL_vs_HEMATOG_markers[which(BALL_vs_HEMATOG_markers$avg_logFC>0),], n=50))
+top_genes2_b3 <- rownames(head(BALL_vs_HEMATOG_markers[which(BALL_vs_HEMATOG_markers$avg_logFC<0),], n=50))
+```
+
+* B-ALL (clusters 0 & 1) versus Physiological mature B-cells (cluster4)
+```{r, message=FALSE}
+#2- compare B-ALL to mature B-cells
+##Do the comparison
+BALL_vs_BMATURE_markers <- FindMarkers(object = Seurat, ident.1 = c("(0) B-ALL","(1) B-ALL"), ident.2 = "(4) Physiological B-cells" ,only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+##Table of differentially expressed genes
+datatable(BALL_vs_BMATURE_markers, options = list(pageLength = 10)) %>% formatRound(2:4, 2) %>% formatSignif(c(1,5), digits = 2)
+#keep only genes in scale.data
+BALL_vs_BMATURE_markers <- BALL_vs_BMATURE_markers[intersect(rownames(Seurat@assays$RNA@scale.data),rownames(BALL_vs_BMATURE_markers)),]
+BALL_vs_BMATURE_markers <- BALL_vs_BMATURE_markers[order(BALL_vs_BMATURE_markers$p_val_adj,decreasing = F),]
+##Print a heatmap with B-ALL cells + 20 cells + Mature B-cells 
+bcell4 <- colnames(subset(Seurat, idents = "(4) Physiological B-cells" ))
+top_genes_b4 <- rownames(head(BALL_vs_BMATURE_markers[which(BALL_vs_BMATURE_markers$avg_logFC>0),], n=50))
+top_genes2_b4 <- rownames(head(BALL_vs_BMATURE_markers[which(BALL_vs_BMATURE_markers$avg_logFC<0),], n=50))
+
+# Get genes differentially expressed for both comparison
+top_genes_b3_b4 <- intersect(top_genes_b4,top_genes_b3)
+top_genes2_b3_b4 <- intersect(top_genes2_b4,top_genes2_b3)
+```
+
+**Common top genes differentially expressed in: **
+
+1 - tumoral cells (clusters 0 & 1, excluding the 20 T1 CD19neg cells) and immature B-cells (cluster 3)
+
+**and**
+
+2 - tumoral cells (clusters 0 & 1, excluding the 20 T1 CD19neg cells) and mature B-cells (cluster 4)
+```{r, message=FALSE}
+top_genes_b3_b4
+top_genes2_b3_b4
+```
+
+
+
+
+
+*Heatmap showing the expression level of genes from the above list.*
+
+* Clusters 0, 1 & 3 were down-sampled to 100 cells for a better readability.
+
+```{r,fig.width = 7, fig.height = 9, message=FALSE}
+#Hand picked (common to hematogones and mature B-cells)
+DoHeatmap(Seurat, features = c("CD34","CLTC","HSPB1","YBX1","PDLIM1","HSP90AB1","TCL1B","GNA15","PRDX1","RASD1","RUBCNL","NCF1","RPL7A","CD79B","RPS6","RPL12","CD9","RPL35","POU2AF1","IGHV5-78"), cells = c(ball0,ball1,ballt1neg,bcell3,bcell4), size = 3.5 ,raster = FALSE)
+```
+
+* Full heatmap
+
+```{r,fig.width = 9, fig.height = 9, message=FALSE}
+DoHeatmap(Seurat, features = c("CD34","CLTC","HSPB1","YBX1","PDLIM1","HSP90AB1","TCL1B","GNA15","PRDX1","RASD1","RUBCNL","NCF1","RPL7A","CD79B","RPS6","RPL12","CD9","RPL35","POU2AF1","IGHV5-78"),colnames(subset(Seurat, idents = c("(0) B-ALL","(1) B-ALL","(0 & 1) T1 CD19neg in B-ALL","(3) Physiological B-cells","(4) Physiological B-cells"))), size = 3.5,raster = FALSE)
+```
+
+**B-ALL versus Myeloid cells**
+
+```{r, message=FALSE}
+#3- compare B-ALL to myeloid
+##Do the comparison
+BALL_vs_MYELO_markers <- FindMarkers(object = Seurat, ident.1 = c("(0) B-ALL","(1) B-ALL"), ident.2 = "(2) Myeloid" ,only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+##Table of differentially expressed genes
+datatable(BALL_vs_MYELO_markers, options = list(pageLength = 10)) %>% formatRound(2:4, 2) %>% formatSignif(c(1,5), digits = 2)
+#keep only genes in scale.data
+BALL_vs_MYELO_markers <- BALL_vs_MYELO_markers[intersect(rownames(Seurat@assays$RNA@scale.data),rownames(BALL_vs_MYELO_markers)),]
+BALL_vs_MYELO_markers <- BALL_vs_MYELO_markers[order(BALL_vs_MYELO_markers$p_val_adj,decreasing = F),]
+##Print a heatmap with B-ALL cells + 20 cells + Myeloid cells 
+top_genes <- rownames(head(BALL_vs_MYELO_markers[which(BALL_vs_MYELO_markers$avg_logFC>0),], n=10))
+top_genes2 <- rownames(head(BALL_vs_MYELO_markers[which(BALL_vs_MYELO_markers$avg_logFC<0),], n=10))
+
+myelo <- sample(colnames(subset(Seurat, idents = "(2) Myeloid" )), 100) ## Randomly select clones for the heatmap
+
+top_genes_myelo1 <- rownames(head(BALL_vs_MYELO_markers[which(BALL_vs_MYELO_markers$avg_logFC>0),], n=50))
+top_genes_myelo2 <- rownames(head(BALL_vs_MYELO_markers[which(BALL_vs_MYELO_markers$avg_logFC<0),], n=50))
+```
+
+
+
+*Heatmap showing the expression level of the top 100 differentially expressed genes (50 up- and 50 down-regulated genes) between tumoral cells (clusters 0 & 1, excluding the 20 T1 CD19neg cells) and myeloid cells (cluster 2).*
+
+* Clusters 0, 1 & 2 were down-sampled to 100 cells for a better readability.
+```{r,fig.width = 7, fig.height = 12, message=FALSE}
+DoHeatmap(Seurat, features = c(top_genes_myelo1,top_genes_myelo2), cells = c(ball0,ball1,ballt1neg,myelo), size = 3.5, raster = FALSE)
+```
+
+* Full heatmap
+
+```{r,fig.width = 9, fig.height = 12, message=FALSE}
+DoHeatmap(Seurat, features = c(top_genes_myelo1,top_genes_myelo2), cells = colnames(subset(Seurat, idents = c("(0) B-ALL","(1) B-ALL","(0 & 1) T1 CD19neg in B-ALL","(2) Myeloid"))), size = 3.5, raster = FALSE)
+```
+
+**B-ALL versus NK cells**
+
+```{r, message=FALSE}
+#4- compare B-ALL to NK
+##Do the comparison
+BALL_vs_NK_markers <- FindMarkers(object = Seurat, ident.1 = c("(0) B-ALL","(1) B-ALL"), ident.2 = "(5) NK cells" ,only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+##Table of differentially expressed genes
+datatable(BALL_vs_NK_markers, options = list(pageLength = 10)) %>% formatRound(2:4, 2) %>% formatSignif(c(1,5), digits = 2)
+#keep only genes in scale.data
+BALL_vs_NK_markers <- BALL_vs_NK_markers[intersect(rownames(Seurat@assays$RNA@scale.data),rownames(BALL_vs_NK_markers)),]
+BALL_vs_NK_markers <- BALL_vs_NK_markers[order(BALL_vs_NK_markers$p_val_adj,decreasing = F),]
+##Print a heatmap with 20 T1 CD19neg cells + B-ALL cells +  NK cells 
+nk <- colnames(subset(Seurat, idents = "(5) NK cells"))
+top_genes_nk1 <- rownames(head(BALL_vs_NK_markers[which(BALL_vs_NK_markers$avg_logFC>0),], n=50))
+top_genes_nk2 <- rownames(head(BALL_vs_NK_markers[which(BALL_vs_NK_markers$avg_logFC<0),], n=50))
+```
+
+
+
+*Heatmap showing the expression level of the top 100 differentially expressed genes (50 up- and 50 down-regulated genes) between tumoral cells (clusters 0 & 1, excluding the 20 T1 CD19neg cells) and NK cells (cluster 5).*
+
+* Clusters 0 & 1 were down-sampled to 100 cells for a better readability.
+
+```{r,fig.width = 6, fig.height = 12, message=FALSE}
+DoHeatmap(Seurat, features = c(top_genes_nk1,top_genes_nk2), cells = c(ball0,ball1,ballt1neg,nk), size = 3.5, raster = FALSE)
+```
+
+* Full heatmap
+
+```{r,fig.width = 8, fig.height = 12, message=FALSE}
+DoHeatmap(Seurat, features = c(top_genes_nk1,top_genes_nk2), cells = colnames(subset(Seurat, idents = c("(0) B-ALL","(1) B-ALL","(0 & 1) T1 CD19neg in B-ALL","(5) NK cells"))), size = 3.5, raster = FALSE)
+```
+
+
+* Dotplot showing markers expression across clusters, except that the 20 T1 CD19neg cells present in B-ALL clusters are shown independently.
+(Figure 2C)
+
+```{r, fig.width = 12, message=FALSE}
+Idents(Seurat) <- "clusterSubset"
+Seurat@active.ident <-factor(Seurat@active.ident, levels = c("(5) NK cells","(2) Myeloid","(4) Physiological B-cells","(3) Physiological B-cells","(1) B-ALL","(0) B-ALL","(0 & 1) T1 CD19neg in B-ALL"))
+dp <- DotPlot(Seurat, features = c("TCL1B","PDLIM1","CLTC","S100A16","CD34","RPS14","CD79A","CD79B","CD19","NKG7","GNLY","KLRD1","GZMB","KLRC1","LYZ","CD68","LGALS3","CD14","CD33"), cols = c("blue","red") ) + RotatedAxis()
+dp + labs(title = "Expression of marker genes by clusters")
+```
+
+
+### Common tumoral markers
+
+Comparison of B-ALL cells (cluster 0 and 1) to physiological cells (clusters 2, 3, 4 & 5)
+```{r,fig.width = 6, fig.height = 9, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+if(! file.exists(paste0(OUTPUT_PATH, "FindMarkers_clusters0_and_1_versus_all_others_", SAMPLE,".Robj"))){
+  Seurat_common_tumoral_markers <- FindMarkers(object = Seurat, ident.1 = c("0","1"), ident.2 = c("2","3","4","5"), only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+  save(Seurat_common_tumoral_markers, file = paste0(OUTPUT_PATH, "FindMarkers_clusters0_and_1_versus_all_others_", SAMPLE,".Robj"))
+}else{
+  load(paste0(OUTPUT_PATH, "FindMarkers_clusters0_and_1_versus_all_others_", SAMPLE,".Robj"))
+}
+datatable(Seurat_common_tumoral_markers, options = list(pageLength = 10)) %>% formatRound(2:4, 2) %>% formatSignif(c(1,5), digits = 2)
+FeaturePlot( Seurat, features = c("TCL1B","S100A16","RPS14","RPL7A"),pt.size = 2, cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"), reduction = "umap")
+
+
+Seurat_common_tumoral_markers$gene <- rownames(Seurat_common_tumoral_markers)
+top_genes_tum <- Seurat_common_tumoral_markers %>%  top_n(30, avg_logFC) %>% top_n(50, p_val)
+top_genes_tum <- Seurat_common_tumoral_markers %>% top_n(30, p_val)
+```
+
+
+
+
+### Tumoral progression
+We selected clusters of interest (0 and 1) to search for tumoral progression markers between T1 CD19pos and T2 CD19neg:
+KLF6 is the most differentially expressed transcription factor.
+
+```{r, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+subset.tum <- subset(x = Seurat, idents = c("0","1"))
+
+Idents(subset.tum) <- "hash.ID"
+if(! file.exists(paste0(OUTPUT_PATH, "FindMarkers_T1-CD19p_vs_T2-CD19n_subset-tum_", SAMPLE,".Robj"))){
+  Seurat_object_markers_tum <- FindMarkers(object = subset.tum, ident.1 = "T1-CD19pos", ident.2 = "T2-CD19neg", only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25, do.print = FALSE)
+  save(Seurat_object_markers_tum, file = paste0(OUTPUT_PATH, "FindMarkers_T1-CD19p_vs_T2-CD19n_subset-tum_", SAMPLE,".Robj"))
+}else{
+  load(paste0(OUTPUT_PATH, "FindMarkers_T1-CD19p_vs_T2-CD19n_subset-tum_", SAMPLE,".Robj"))
+}
+datatable(Seurat_object_markers_tum, options = list(pageLength = 10)) %>% formatRound(2:4, 2) %>% formatSignif(c(1,5), digits = 2)
+write.table(Seurat_object_markers_tum, file = paste0(OUTPUT_PATH, "FindMarkers_T1-CD19p_vs_T2-CD19n_subset-tum_", SAMPLE,".csv"), sep = ",")
+```
+
+```{r, fig.width = 8, fig.height = 4, message=FALSE}
+Idents(subset.tum) <- "RNA_snn_res.0.1"
+
+#keep only genes in scale.data
+tum_progression_markers <- Seurat_object_markers_tum[intersect(rownames(Seurat@assays$RNA@scale.data),rownames(Seurat_object_markers_tum)),]
+tum_progression_markers <- tum_progression_markers[order(tum_progression_markers$p_val_adj,decreasing = F),]
+
+top_genes_tum_T1_sv_T2_1 <- rownames(head(tum_progression_markers[which(tum_progression_markers$avg_logFC>0),], n=10))
+top_genes_tum_T1_sv_T2_2 <- rownames(head(tum_progression_markers[which(tum_progression_markers$avg_logFC<0),], n=10))
+DoHeatmap(subset.tum, features = c(top_genes_tum_T1_sv_T2_1,top_genes_tum_T1_sv_T2_2), size = 3.5, raster = FALSE)
+```
+
+* CD19 is differentially expressed between T1 B-ALL and T2 B-ALL :
+Figure S3B
+
+```{r fig.width = 4.5, fig.height = 5, message=FALSE}
+Idents(subset.tum) <- "hash.ID"
+VlnPlot(object = subset.tum, features = c("CD19"), group.by = "hash.ID", cols = c("#00BFC4","#B79F00","#619CFF","#00BA38","orange","#7c0073","#F564E3","red","blue"), idents = c("T1-CD19pos","T2-CD19neg"), pt.size = 0.1)
+```
+
+
+##SCENIC {.tabset}
+Gene regulatory network inference and individual cells network/regulon activity scoring
+
+```{r add_SCENIC_data_2_Seurat}
+#Load SCENIC output to add to the Seurat object
+DATA_FOLDER="<WORKING_DIR>/Seurat_analysis/data/SCENIC_output_data/"
+# If you ran yourself the SCENIC analysis, you produced your own file so you can change the data folder to :
+#DATA_FOLDER="<WORKING_DIR>/SCENIC_analysis/tmp/"
+  
+aucmtx = t(read.table(file = paste0(DATA_FOLDER, "auc_mtx.csv"), sep = ',', header = TRUE, row.names = 1))
+```
+
+
+```{r add_auc, results='asis'}
+### Adding AUC
+########################################
+# Add AUC data as a new assay independent from RNA
+Seurat[["AUC"]] <- CreateAssayObject(counts = aucmtx[,colnames(Seurat)])
+```
+
+
+We check the transcription factor the most differentially expressed between B-ALL at T1 and T2 to see if their regulon activity was impacted
+
+
+###KLF6
+``` {r loadSCENICoutput}
+TFregulon = "auc_KLF6..."
+TF = "rna_KLF6"
+```
+
+KLF6 mRNA expression level
+
+``` {r KLF6mRNAplot, fig.width = 5, fig.height = 7}
+FeaturePlot( Seurat, features = c(TF),pt.size = 2, cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"), reduction = "umap")
+```
+
+
+KLF6 regulon activity (calculated with SCENIC)
+
+``` {r KLF6regulonplot, fig.width = 5, fig.height = 7}
+FeaturePlot( Seurat, features = c(TFregulon),pt.size = 2, cols = c("light blue", "red3"), reduction = "umap")
+```
+
+
+
+# Browse by figures
+##Main figures {.tabset}
+###Figure 1B 
+
+Dotplot showing the expression level of marker genes in each cluster
+
+```{r, fig.width = 7, fig.height = 3, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+Seurat@active.ident <- factor(Seurat@active.ident,levels=c("5","2","4","3","1","0"))
+dp <- DotPlot(Seurat, features = c("CD34","RPS14","CD79A","CD79B","CD19","NKG7","GNLY","KLRD1","GZMB","KLRC1","LYZ","CD68","LGALS3","CD14","CD33"), cols = c("blue","red") ) + RotatedAxis()
+dp + labs(title = "Expression of marker genes by clusters")
+```
+
+
+###Figure 1C
+
+UMAP visualisation of clusters (resolution 0.1)
+
+```{r paper_fig01, fig.width = 5.2, fig.height = 7, message=FALSE}
+Idents(Seurat) <- "RNA_snn_res.0.1"
+DimPlot(Seurat, reduction = "umap", group.by = "RNA_snn_res.0.1", do.label = TRUE, pt.size = 1, cols = c("#00BFC4","#B79F00","#619CFF","#00BA38","orange","#7c0073","#F564E3","red","blue"))#+NoLegend()
+```
+
+
+###Figure 1D
+
+UMAP visualization of the 4 demultiplexed samples
+
+```{r paper_figs1, fig.width = 6, fig.height = 7, message=FALSE}
+DimPlot(Seurat, reduction = "umap", group.by = "hash.ID", do.label = TRUE, pt.size = 1, cols = c("#00BA38","#B79F00","#00BFC4","red"), order = c("T1-CD19n","T1-CD19p","T2-CD19n","T2-CD19p") )#+NoLegend()
+```
+
+###Figure 2A
+
+Zoom on clusters 0 and 1, UMAP plot focused on tumoral cells colored according to the sample of origin. 
+T1 CD19neg cells for which CD19 transcript presence was tested by PCR are labelled.
+
+```{r paper_fig2A-1, fig.width = 7, fig.height = 7, message=FALSE}
+#Figure panel 2
+#Zoom on the tumoral area (we will miss 4 cells which are in T1-CD19neg area, those cells might be T1-CD19pos/T1-CD19neg doublets)
+Idents(Seurat) <- "PCRCells"
+cellToVisualize = rownames(subset.tum@reductions$umap@cell.embeddings[which(subset.tum@reductions$umap@cell.embeddings[,2] > -10),])
+subset.tum.zoom <- subset(x = subset.tum, cells = cellToVisualize)
+
+#Label cells present on Figure2 PCR gel
+## Add a metadata field
+Seurat@meta.data$paperPCRCells <- paste0("Not_on_figure_BCs_",1:length( Cells( Seurat)))
+Seurat@meta.data["CACCACTTCCTTGACC",]$paperPCRCells = "BC2"
+Seurat@meta.data["GTGCGGTTCGAGGTAG",]$paperPCRCells = "BC3"
+Seurat@meta.data["CTAGTGACAATGGTCT",]$paperPCRCells = "BC4"
+Seurat@meta.data["GACACGCAGTCCGGTC",]$paperPCRCells = "BC6"
+Seurat@meta.data["GTTACAGGTTACAGAA",]$paperPCRCells = "BC7"
+Seurat@meta.data["CCTCAGTGTGATGATA",]$paperPCRCells = "BC8"
+Seurat@meta.data["CCGTGGACAGCTGGCT",]$paperPCRCells = "BC11"
+Seurat@meta.data["GTTAAGCTCTAACCGA",]$paperPCRCells = "BC12"
+Seurat@meta.data["AGATCTGGTGAGGCTA",]$paperPCRCells = "BC16"
+Seurat@meta.data["GAATAAGGTGCACTTA",]$paperPCRCells = "BC17"
+Seurat@meta.data["GGACGTCGTAAACACA",]$paperPCRCells = "BC18"
+Seurat@meta.data["TACACGAAGTACGCCC",]$paperPCRCells = "BC19"
+Seurat@meta.data["ATTATCCTCAGATAAG",]$paperPCRCells = "BC20"
+Seurat@meta.data["ATCATCTGTGGACGAT",]$paperPCRCells = "BC21"
+Seurat@meta.data["GCATGCGGTCGAAAGC",]$paperPCRCells = "BC22"
+Seurat@meta.data["CGGAGTCGTATGCTTG",]$paperPCRCells = "BC38"
+Seurat@meta.data["GAACATCAGTGCCAGA",]$paperPCRCells = "BC32"
+Seurat@meta.data["CACACCTGTCGAACAG",]$paperPCRCells = "BC33"
+Seurat@meta.data["GACGTGCTCGGAAATA",]$paperPCRCells = "BC34"
+Seurat@meta.data["GCTTGAACAATGGACG",]$paperPCRCells = "BC35"
+
+
+## List barcodes shown on figure 2A 
+paperPCRCells <- c("CCGTGGACAGCTGGCT","GTTAAGCTCTAACCGA","AGATCTGGTGAGGCTA","GAATAAGGTGCACTTA","GGACGTCGTAAACACA","TACACGAAGTACGCCC","ATTATCCTCAGATAAG","ATCATCTGTGGACGAT","GCATGCGGTCGAAAGC","CGGAGTCGTATGCTTG")
+
+## Plot the zoomed UMAP with barcode labels
+zoom_umap <- DimPlot(subset.tum.zoom, reduction = "umap", group.by = "hash.ID", do.label = TRUE, pt.size = 1, cols = c("#00BA38","#B79F00","#00BFC4","red"), order = c("T1-CD19neg","T1-CD19pos","T2-CD19neg","T2-CD19pos"))
+LabelPoints(plot = zoom_umap, points = paperPCRCells, labels = Seurat@meta.data[paperPCRCells,]$paperPCRCells, repel = TRUE, xnudge = -4, ynudge = -2)+ggtitle("Backtracked cells")
+
+```
+
+
+* All cells for which CD19 transcript presence was tested by PCR are labelled.
+
+```{r paper_figS2A-2, fig.width = 7, fig.height = 7, message=FALSE}
+## List barcodes shown on figure 2E 
+paperPCRCells <- c(ctrlpos,ctrlneg,"CCGTGGACAGCTGGCT","GTTAAGCTCTAACCGA","AGATCTGGTGAGGCTA","GAATAAGGTGCACTTA","GGACGTCGTAAACACA","TACACGAAGTACGCCC","ATTATCCTCAGATAAG","ATCATCTGTGGACGAT","GCATGCGGTCGAAAGC","CGGAGTCGTATGCTTG","GAACATCAGTGCCAGA","CACACCTGTCGAACAG","GACGTGCTCGGAAATA","GCTTGAACAATGGACG")
+
+## Plot the zoomed UMAP with barcode labels
+zoom_umap <- DimPlot(subset.tum.zoom, reduction = "umap", group.by = "hash.ID", do.label = TRUE, pt.size = 1, cols = c("#00BA38","#B79F00","#00BFC4","red"), order = c("T1-CD19neg","T1-CD19pos","T2-CD19neg","T2-CD19pos"))
+LabelPoints(plot = zoom_umap, points = paperPCRCells, labels = Seurat@meta.data[paperPCRCells,]$paperPCRCells, repel = TRUE, xnudge = -4, ynudge = -2)+ggtitle("Backtracked cells")
+```
+
+###Figure 2B
+
+Common top genes differentially expressed in  :
+
+1 - tumoral cells (clusters 0 & 1, excluding the 20 T1 CD19neg cells) and hematogones (cluster 3)
+
+and
+
+2 - tumoral cells (clusters 0 & 1, excluding the 20 T1 CD19neg cells) and mature B-cells (cluster 4)
+
+```{r paper_fig2B, fig.width = 7, fig.height = 7, message=FALSE}
+Idents(Seurat) <- "clusterSubset"
+#Hand picked (common to hematogones and mature B-cells comparisons)
+DoHeatmap(Seurat, features = c("CD34","CLTC","HSPB1","YBX1","PDLIM1","HSP90AB1","TCL1B","GNA15","PRDX1","RASD1","RUBCNL","NCF1","RPL7A","CD79B","RPS6","RPL12","CD9","RPL35","POU2AF1","IGHV5-78"), cells = c(ball0,ball1,ballt1neg,bcell3,bcell4), size = 3.5, raster = FALSE)
+```
+
+###Figure 2C
+
+Dotplot showing markers expression across clusters, except that the 20 T1 CD19neg cells present in B-ALL clusters are shown independently.
+
+```{r paper_fig2C, fig.width = 12, fig.height = 5, message=FALSE}
+Idents(Seurat) <- "clusterSubset"
+Seurat@active.ident <-factor(Seurat@active.ident, levels = c("(5) NK cells","(2) Myeloid","(4) Physiological B-cells","(3) Physiological B-cells","(1) B-ALL","(0) B-ALL","(0 & 1) T1 CD19neg in B-ALL"))
+dp <- DotPlot(Seurat, features = c("TCL1B","PDLIM1","CLTC","S100A16","CD34","RPS14","CD79A","CD79B","CD19","NKG7","GNLY","KLRD1","GZMB","KLRC1","LYZ","CD68","LGALS3","CD14","CD33"), cols = c("blue","red") ) + RotatedAxis()
+dp + labs(title = "Expression of marker genes by clusters")
+```
+
+
+
+##Supplementary figures {.tabset}
+###Figure S3
+UMAP visualization of KLF6 mRNA expression and regulon activity
+```{r FigureS3, fig.width = 5.2, fig.height = 7, message=FALSE}
+TFregulon = "auc_KLF6..."
+TF = "rna_KLF6"
+
+FeaturePlot( Seurat, features = c(TF),pt.size = 2, cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black"), reduction = "umap")
+
+FeaturePlot( Seurat, features = c(TFregulon),pt.size = 2, cols = c("light blue", "red3"), reduction = "umap")
+
+```
+
+
+
+###Figure S4
+
+Figure S4A (interactive)
+
+UMAP visualization of CD19 mRNA 
+```{r figureS4A, fig.width = 6, fig.height = 7, message=FALSE}
+ggplotly(FeaturePlot(object = Seurat, features = "CD19", shape.by = "hash.ID",reduction = "umap",  cols = c("grey", "light blue","cyan3","cyan4","dodgerblue3","blue","mediumslateblue","purple","orchid3","red","brown","black")))
+```
+
+Figure S4B
+
+Violin plot of CD19 mRNA in T1-CD19pos (blue) and T2-CD19neg (gold) cells present in cluster 0 or 1
+
+```{r figureS4B, fig.width = 4.5, fig.height = 5, message=FALSE}
+Idents(subset.tum.zoom) <- "hash.ID"
+VlnPlot(object = subset.tum, features = c("CD19"), group.by = "hash.ID", cols = c("#00BFC4","#B79F00","#619CFF","#00BA38","orange","#7c0073","#F564E3","red","blue"), idents = c("T1-CD19pos","T2-CD19neg"), pt.size = 0.1)
+
+# Idents(Seurat) <- "hash.ID"
+# VlnPlot(object = Seurat, features = c("CD19"), group.by = "hash.ID", cols = c("#00BFC4","#B79F00","#619CFF","#00BA38","orange","#7c0073","#F564E3","red","blue"), idents = c("T1-CD19pos","T2-CD19neg"), pt.size = 0.1)
+```
+
+Percentage of cells expressing CD19 :
+```{r, message=FALSE}
+cd19ExpPercentInT2cd19neg <- sum(GetAssayData(object = subset.tum, slot = "data")["CD19",row.names(subset(subset.tum@meta.data, hash.ID == "T2-CD19neg"))]>0)/length(row.names(subset(subset.tum@meta.data, hash.ID == "T2-CD19neg")))*100
+cd19ExpPercentInT1cd19pos <- sum(GetAssayData(object = subset.tum, slot = "data")["CD19",row.names(subset(subset.tum@meta.data, hash.ID == "T1-CD19pos"))]>0)/length(row.names(subset(subset.tum@meta.data, hash.ID == "T1-CD19pos")))*100
+```
+* T1-CD19pos : `r cd19ExpPercentInT1cd19pos` % of cells expressing CD19
+* T2-CD19neg : `r cd19ExpPercentInT2cd19neg` % of cells expressing CD19
+
+CD19 is differentially expressed in tumoral T1-CD19pos cells compared to tumoral T2-CD19neg cells ( Wilcoxon Rank Sum test : average log FC 0.55 ; adjusted pvalue 7.1e-51, see "Extra DEG analysis" section)
+
+###Figure S5
+
+__*Figure S5A : B-ALL versus Myeloid cells*__
+
+Heatmap showing the expression level of the top 100 differentially expressed genes (50 up- and 50 down-regulated genes) between tumoral cells (clusters 0 & 1, excluding the 20 T1 CD19neg cells) and myeloid cells (cluster 2)
+
+* Clusters 0, 1 & 2 were down-sampled to 100 cells for a better readability.
+
+```{r, fig.width = 7, fig.height = 12, message=FALSE}
+DoHeatmap(Seurat, features = c(top_genes_myelo1,top_genes_myelo2), cells = c(ball0,ball1,ballt1neg,myelo), size = 3.5, raster = FALSE)
+```
+
+
+
+__*B-ALL versus NK cells*__
+
+Heatmap showing the expression level of the top 100 differentially expressed genes (50 up- and 50 down-regulated genes) between tumoral cells (clusters 0 & 1, excluding the 20 T1 CD19neg cells) and NK cells (cluster 5).
+
+* Clusters 0 & 1 were down-sampled to 100 cells for a better readability.
+
+```{r,fig.width = 7, fig.height = 12, message=FALSE}
+DoHeatmap(Seurat, features = c(top_genes_nk1,top_genes_nk2), cells = c(ball0,ball1,ballt1neg,nk), size = 3.5, raster = FALSE)
+```
+
+###Figure S6
+
+```{r RNA_violinPlots, message=FALSE}
+VlnPlot(Seurat,features = c("nFeature_RNA"),pt.size = 0.1, log = TRUE,  group.by = "clusterSubset", cols =  c("red","#00BFC4","#B79F00","#619CFF","#00BA38","orange","#7c0073"))
+# median(Seurat@meta.data[which(Seurat@meta.data$clusterSubset == "(0 & 1) T1 CD19neg in B-ALL"),]$nFeature_RNA)
+# median(Seurat@meta.data[which(Seurat@meta.data$clusterSubset == "(0) B-ALL"),]$nFeature_RNA)
+# median(Seurat@meta.data[which(Seurat@meta.data$clusterSubset == "(1) B-ALL"),]$nFeature_RNA)
+# median(Seurat@meta.data[which(Seurat@meta.data$clusterSubset == "(2) Myeloid"),]$nFeature_RNA)
+# median(Seurat@meta.data[which(Seurat@meta.data$clusterSubset == "(3) Physiological B-cells"),]$nFeature_RNA)
+# median(Seurat@meta.data[which(Seurat@meta.data$clusterSubset == "(4) Physiological B-cells"),]$nFeature_RNA)
+# median(Seurat@meta.data[which(Seurat@meta.data$clusterSubset == "(5) NK cells"),]$nFeature_RNA)
+```
+
+###Figure S7
+
+Zoom on clusters 0 and 1, UMAP plot focused on tumoral cells colored according to the sample of origin. 
+T2 CD19neg cells are highlighted and cells for which CD19 transcript presence was tested by PCR are labelled.
+
+```{r paper_figS7, fig.width = 4.5, fig.height = 5, message=FALSE}
+Idents(Seurat) <- "PCRCells"
+paperPCRCells <- c(ctrlneg,"CACACCTGTCGAACAG","GACGTGCTCGGAAATA","GCTTGAACAATGGACG","GAACATCAGTGCCAGA")
+zoom_umap2 <- DimPlot(subset.tum.zoom, reduction = "umap", group.by = "hash.ID", do.label = TRUE, pt.size = 1, cols = c("grey","#B79F00"), order = c("T1-CD19neg","T1-CD19pos","T2-CD19neg","T2-CD19pos") , cells.highlight = row.names(subset(Seurat@meta.data, hash.ID == "T2-CD19neg")) , sizes.highlight = 3, cols.highlight = "#B79F00")+NoLegend()
+LabelPoints(plot = zoom_umap2, points = paperPCRCells,  labels = Seurat@meta.data[paperPCRCells,]$paperPCRCells, repel = TRUE, xnudge = -1, ynudge = -2.5)+ggtitle("T2-CD19neg backtracked cells")
+```
+
+
+```{r, message=FALSE}
+save(Seurat, file = paste0(OUTPUT_PATH, "Seurat_final_",SAMPLE, ".Robj"))
+```
+
+# Session info
+```{r session}
+sessionInfo()
+```

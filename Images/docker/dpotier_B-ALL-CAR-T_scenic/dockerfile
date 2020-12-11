@@ -1,0 +1,6 @@
+ARG BASE_CONTAINER=jupyter/scipy-notebook
+FROM $BASE_CONTAINER
+
+
+RUN pip install --upgrade pip && \
+    pip install pyscenic==0.9.19
